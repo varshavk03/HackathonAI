@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
-from faster_whisper import WhisperModel
+import whisper
 
 st.set_page_config(
     page_title="Tamil → English Subtitle Generator",
@@ -13,15 +13,16 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🎬 Tamil Video → English Subtitles")
-st.caption("Upload a Tamil video, translate the speech to English, review the subtitles, and burn them into the video.")
+st.title("🎬 Tamil → English Subtitle Generator")
+st.caption("Upload a Tamil video → translate it to English → review the translation → burn movie-style subtitles.")
 
-# ---------- Helpers ----------
+# ---------------------------------------------------------
+# Whisper: KEEP THE SAME TRANSLATION METHOD AS THE ORIGINAL
+# NOTEBOOK. This is intentionally NOT a different translator.
+# ---------------------------------------------------------
 @st.cache_resource
-def load_whisper(model_name: str):
-    # CPU-friendly implementation for Streamlit Cloud.
-    # int8 greatly reduces RAM usage compared with full-precision Whisper.
-    return WhisperModel(model_name, device="cpu", compute_type="int8")
+def load_whisper(model_name):
+    return whisper.load_model(model_name)
 
 
 def fmt_time(t):
@@ -38,52 +39,35 @@ def to_srt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def compact_subtitle(text, max_chars=42):
-    """Keep subtitles compact, targeting a maximum of about two lines."""
-    text = re.sub(r"\\s+", " ", text.strip())
-    if len(text) <= max_chars:
-        return text
-
-    words = text.split()
-    lines = ["", ""]
-    for word in words:
-        candidate = (lines[0] + " " + word).strip()
-        if len(candidate) <= max_chars:
-            lines[0] = candidate
-        else:
-            lines[1] = (lines[1] + " " + word).strip()
-
-    if not lines[1]:
-        return lines[0]
-    return lines[0] + "\\n" + lines[1]
-
-
 def build_srt(segments):
     lines = []
-    for i, seg in enumerate(segments, start=1):
-        text = compact_subtitle(seg["text"])
+    n = 1
+    for seg in segments:
+        text = seg["text"].strip()
         if not text:
             continue
+
         lines.extend([
-            str(i),
+            str(n),
             f'{to_srt_time(seg["start"])} --> {to_srt_time(seg["end"])}',
             text,
             "",
         ])
+        n += 1
+
     return "\n".join(lines)
 
 
-def escape_subtitle_path(path):
-    # ffmpeg's subtitles filter uses ':' as an option separator.
-    # Escape characters that commonly matter in filter arguments.
-    p = str(path).replace("\\", r"\\").replace(":", r"\:")
+def escape_filter_path(path):
+    p = str(path).replace("\\", r"\\")
+    p = p.replace(":", r"\:")
     p = p.replace("'", r"\'")
     return p
 
 
 def burn_subtitles(input_path, srt_path, output_path, font_size):
-    # Movie-style subtitles: small white text, bottom-center,
-    # with a subtle semi-transparent black background.
+    # Movie-style: small white text, bottom center, subtle black box.
+    # The subtitle size is intentionally much smaller than the original 18.
     style = (
         f"FontName=Arial,"
         f"FontSize={font_size},"
@@ -95,14 +79,16 @@ def burn_subtitles(input_path, srt_path, output_path, font_size):
         "Outline=2,"
         "Shadow=0,"
         "Alignment=2,"
-        "MarginL=70,"
-        "MarginR=70,"
+        "MarginL=60,"
+        "MarginR=60,"
         "MarginV=45,"
         "Spacing=0,"
         "WrapStyle=2"
     )
 
-    srt_filter_path = escape_subtitle_path(srt_path)
+    srt_filter_path = escape_filter_path(srt_path)
+
+    # Faster than the original notebook while retaining good visual quality.
     cmd = [
         "ffmpeg", "-y",
         "-i", str(input_path),
@@ -117,30 +103,41 @@ def burn_subtitles(input_path, srt_path, output_path, font_size):
     ]
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
+
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr[-4000:])
+        raise RuntimeError(proc.stderr[-5000:])
 
 
-# ---------- Sidebar ----------
+# ---------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------
 with st.sidebar:
     st.header("Settings")
+
     model_name = st.selectbox(
         "Whisper model",
-        ["tiny", "base", "small", "medium"],
-        index=2,
-        help="tiny/base = fastest; small = recommended balance; medium = more accurate but slower and heavier.",
+        ["small", "medium"],
+        index=1,
+        help="Uses the same OpenAI Whisper translation method as the original notebook. Medium gives better translation quality; small is faster.",
     )
+
     font_size = st.slider(
         "Subtitle font size",
         min_value=10,
-        max_value=30,
+        max_value=20,
         value=13,
         step=1,
-        help="Default is 14, reduced from the original notebook's 18.",
     )
-    st.info("Movie-style subtitles: small white text, bottom-center, subtle black background, and kept away from faces. Video encoding uses a faster preset.")
 
-# ---------- Upload ----------
+    st.info(
+        "Translation uses Whisper's Tamil → English translation mode. "
+        "Subtitles are small, white, bottom-centered and kept away from faces."
+    )
+
+
+# ---------------------------------------------------------
+# Upload
+# ---------------------------------------------------------
 uploaded = st.file_uploader(
     "Upload a Tamil video",
     type=["mp4", "mov", "mkv", "avi", "m4v", "webm"],
@@ -148,54 +145,86 @@ uploaded = st.file_uploader(
 
 if uploaded is None:
     st.markdown("""
-    ### How it works
-    1. Upload your Tamil video.
-    2. Whisper transcribes and translates Tamil → English.
-    3. Review/edit every subtitle line.
-    4. Burn the edited subtitles into the video.
-    5. Download the finished MP4 and/or `.srt` file.
-    """)
+### How it works
+
+1. Upload your Tamil video.
+2. Whisper translates Tamil → English using the **same translation approach as your original notebook**.
+3. Word-level timing keeps subtitles synchronized.
+4. Review and correct the English text.
+5. Burn the subtitles into the video using a small movie-style subtitle format.
+6. Download the MP4 and/or SRT.
+""")
     st.stop()
 
-# Save upload to a temporary directory for ffmpeg.
-work_dir = Path(tempfile.mkdtemp(prefix="tamil_subs_"))
+
+# Keep uploaded video in a temp folder.
+work_dir = Path(tempfile.mkdtemp(prefix="tamil_subtitles_"))
 input_path = work_dir / Path(uploaded.name).name
 input_path.write_bytes(uploaded.getbuffer())
 
-st.success(f"Uploaded: {uploaded.name} ({input_path.stat().st_size / 1_000_000:.1f} MB)")
+st.success(
+    f"Uploaded: {uploaded.name} "
+    f"({input_path.stat().st_size / 1_000_000:.1f} MB)"
+)
 
-# ---------- Transcription ----------
 if "segments" not in st.session_state:
     st.session_state.segments = None
 
-if st.button("🎙️ Translate Tamil → English", type="primary", use_container_width=True):
+
+# ---------------------------------------------------------
+# STEP 1: EXACT TRANSLATION LOGIC FROM ORIGINAL NOTEBOOK
+# ---------------------------------------------------------
+if st.button(
+    "🎙️ Translate Tamil → English",
+    type="primary",
+    use_container_width=True,
+):
     try:
-        with st.status("Preparing AI model and translating...", expanded=True) as status:
-            st.write(f"Loading the **{model_name}** speech model... The first run may take a few minutes while the model downloads.")
+        with st.status(
+            "Translating Tamil → English...",
+            expanded=True,
+        ) as status:
+
+            st.write(
+                f"Loading Whisper **{model_name}** model..."
+            )
+
             model = load_whisper(model_name)
 
-            st.write("Transcribing Tamil and translating it to English with word-level timings...")
-            translated_segments, info = model.transcribe(
+            st.write(
+                "Listening to the video and translating to English..."
+            )
+
+            # This mirrors the original notebook:
+            # model.transcribe(INPUT_VIDEO,
+            #                  task="translate",
+            #                  language="ta",
+            #                  word_timestamps=True)
+            result = model.transcribe(
                 str(input_path),
                 task="translate",
                 language="ta",
                 word_timestamps=True,
-                vad_filter=True,
-                beam_size=1,
+                verbose=False,
             )
 
+            # Same word-level timing logic as the original notebook.
             segments = []
-            for s in translated_segments:
-                subtitle_text = s.text.strip()
+
+            for s in result["segments"]:
+                subtitle_text = s["text"].strip()
+
                 if not subtitle_text:
                     continue
 
-                words = list(s.words) if s.words else []
+                words = s.get("words") or []
+
                 if words:
-                    start = words[0].start
-                    end = words[-1].end
+                    start = words[0]["start"]
+                    end = words[-1]["end"]
                 else:
-                    start, end = s.start, s.end
+                    start = s["start"]
+                    end = s["end"]
 
                 segments.append({
                     "start": float(start),
@@ -203,55 +232,88 @@ if st.button("🎙️ Translate Tamil → English", type="primary", use_containe
                     "text": subtitle_text,
                 })
 
+            # Same safety pass as the original notebook.
             segments.sort(key=lambda x: x["start"])
 
             for i in range(len(segments) - 1):
                 if segments[i]["end"] > segments[i + 1]["start"]:
                     segments[i]["end"] = segments[i + 1]["start"]
+
                 if segments[i]["end"] <= segments[i]["start"]:
                     segments[i]["end"] = segments[i]["start"] + 0.3
 
             st.session_state.segments = segments
-            st.session_state.edited_texts = [s["text"] for s in segments]
-            status.update(label=f"Done — {len(segments)} subtitle lines created.", state="complete")
+            st.session_state.edited_texts = [
+                s["text"] for s in segments
+            ]
+
+            status.update(
+                label=f"Translation complete — {len(segments)} subtitle lines.",
+                state="complete",
+            )
 
     except Exception as e:
-        st.error(f"Translation failed: {e}")
+        st.error(
+            "Whisper translation failed. "
+            "If you are using Streamlit Cloud, try the **small** model "
+            "instead of medium if the server runs out of memory."
+        )
+        st.exception(e)
         st.stop()
 
-# ---------- Review ----------
+
+# ---------------------------------------------------------
+# STEP 2: REVIEW
+# ---------------------------------------------------------
 segments = st.session_state.segments
 
 if segments:
     st.divider()
-    st.subheader("✏️ Review and edit subtitles")
-    st.caption("Correct any translation mistakes below. The timings are automatically preserved.")
+    st.subheader("✏️ Review the English translation")
+    st.caption(
+        "The English text comes directly from Whisper. "
+        "You can correct wording without changing the timings."
+    )
 
     edited = []
+
     for i, seg in enumerate(segments):
-        c1, c2 = st.columns([1.2, 5])
+        c1, c2 = st.columns([1.15, 5])
+
         with c1:
             st.write(f"**{i + 1}**")
-            st.caption(f"{fmt_time(seg['start'])} – {fmt_time(seg['end'])}")
+            st.caption(
+                f"{fmt_time(seg['start'])} – "
+                f"{fmt_time(seg['end'])}"
+            )
+
         with c2:
             value = st.text_area(
                 f"Subtitle {i + 1}",
                 value=st.session_state.edited_texts[i],
                 key=f"subtitle_{i}",
                 label_visibility="collapsed",
-                height=68,
+                height=70,
             )
             edited.append(value)
 
     st.session_state.edited_texts = edited
 
     st.divider()
-    st.subheader("🎞️ Create subtitled video")
+    st.subheader("🎬 Burn movie-style subtitles")
 
-    if st.button("🔥 Burn subtitles into video", type="primary", use_container_width=True):
+    if st.button(
+        "🔥 Burn subtitles into video",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
             final_segments = []
-            for seg, text in zip(segments, st.session_state.edited_texts):
+
+            for seg, text in zip(
+                segments,
+                st.session_state.edited_texts,
+            ):
                 final_segments.append({
                     "start": seg["start"],
                     "end": seg["end"],
@@ -259,29 +321,57 @@ if segments:
                 })
 
             srt_text = build_srt(final_segments)
-            srt_path = work_dir / "subtitles.srt"
-            srt_path.write_text(srt_text, encoding="utf-8")
 
-            output_name = f"{Path(uploaded.name).stem}_english_subs.mp4"
+            srt_path = work_dir / "subtitles.srt"
+            srt_path.write_text(
+                srt_text,
+                encoding="utf-8",
+            )
+
+            output_name = (
+                f"{Path(uploaded.name).stem}_english_subs.mp4"
+            )
             output_path = work_dir / output_name
 
-            with st.status("Burning subtitles into the video...", expanded=True) as status:
-                burn_subtitles(input_path, srt_path, output_path, font_size)
-                status.update(label="Finished — video is ready.", state="complete")
+            with st.status(
+                "Burning subtitles into video...",
+                expanded=True,
+            ) as status:
 
-            st.session_state.output_bytes = output_path.read_bytes()
+                burn_subtitles(
+                    input_path,
+                    srt_path,
+                    output_path,
+                    font_size,
+                )
+
+                status.update(
+                    label="Finished — video is ready.",
+                    state="complete",
+                )
+
+            st.session_state.output_bytes = (
+                output_path.read_bytes()
+            )
             st.session_state.output_name = output_name
-            st.session_state.srt_bytes = srt_text.encode("utf-8")
+            st.session_state.srt_bytes = (
+                srt_text.encode("utf-8")
+            )
 
         except Exception as e:
-            st.error(f"FFmpeg failed: {e}")
+            st.error("FFmpeg failed while burning the subtitles.")
+            st.exception(e)
 
-# ---------- Downloads ----------
+
+# ---------------------------------------------------------
+# DOWNLOADS
+# ---------------------------------------------------------
 if "output_bytes" in st.session_state:
     st.divider()
     st.subheader("⬇️ Download")
 
     col1, col2 = st.columns(2)
+
     with col1:
         st.download_button(
             "🎬 Download subtitled MP4",
@@ -290,6 +380,7 @@ if "output_bytes" in st.session_state:
             mime="video/mp4",
             use_container_width=True,
         )
+
     with col2:
         st.download_button(
             "📝 Download subtitles (.srt)",
