@@ -104,7 +104,7 @@ with st.sidebar:
     model_name = st.selectbox(
         "Whisper model",
         ["small", "medium"],
-        index=1,
+        index=0,
         help=(
             "Same OpenAI Whisper translation method as the original notebook. "
             "Medium gives the best balance of accuracy and speed."
