@@ -95,3 +95,10 @@ The output now uses a movie/reel-style subtitle treatment:
 - Subtle semi-transparent black background
 - Extra bottom margin so it stays away from faces
 - Long subtitles are compacted to approximately two lines
+
+
+## Cloud stability update
+
+The app uses `faster-whisper` with CPU `int8` inference instead of `openai-whisper`/PyTorch. This reduces memory usage and is more suitable for Streamlit Community Cloud.
+
+For the first run, use **tiny**, **base**, or **small**. `small` is the recommended balance of speed and translation quality.

@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
-import whisper
+from faster_whisper import WhisperModel
 
 st.set_page_config(
     page_title="Tamil → English Subtitle Generator",
@@ -19,7 +19,9 @@ st.caption("Upload a Tamil video, translate the speech to English, review the su
 # ---------- Helpers ----------
 @st.cache_resource
 def load_whisper(model_name: str):
-    return whisper.load_model(model_name)
+    # CPU-friendly implementation for Streamlit Cloud.
+    # int8 greatly reduces RAM usage compared with full-precision Whisper.
+    return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
 def fmt_time(t):
@@ -124,9 +126,9 @@ with st.sidebar:
     st.header("Settings")
     model_name = st.selectbox(
         "Whisper model",
-        ["small", "medium", "large"],
-        index=1,
-        help="small = faster, medium = better balance, large = highest accuracy but needs much more RAM/CPU.",
+        ["tiny", "base", "small", "medium"],
+        index=2,
+        help="tiny/base = fastest; small = recommended balance; medium = more accurate but slower and heavier.",
     )
     font_size = st.slider(
         "Subtitle font size",
@@ -169,35 +171,36 @@ if "segments" not in st.session_state:
 if st.button("🎙️ Translate Tamil → English", type="primary", use_container_width=True):
     try:
         with st.status("Preparing AI model and translating...", expanded=True) as status:
-            st.write(f"Loading Whisper **{model_name}** model...")
+            st.write(f"Loading the **{model_name}** speech model... The first run may take a few minutes while the model downloads.")
             model = load_whisper(model_name)
 
-            st.write("Listening to the video and creating word-level timings...")
-            result = model.transcribe(
+            st.write("Transcribing Tamil and translating it to English with word-level timings...")
+            translated_segments, info = model.transcribe(
                 str(input_path),
                 task="translate",
                 language="ta",
                 word_timestamps=True,
-                verbose=False,
+                vad_filter=True,
+                beam_size=1,
             )
 
             segments = []
-            for s in result["segments"]:
-                text = s["text"].strip()
-                if not text:
+            for s in translated_segments:
+                subtitle_text = s.text.strip()
+                if not subtitle_text:
                     continue
 
-                words = s.get("words") or []
+                words = list(s.words) if s.words else []
                 if words:
-                    start = words[0]["start"]
-                    end = words[-1]["end"]
+                    start = words[0].start
+                    end = words[-1].end
                 else:
-                    start, end = s["start"], s["end"]
+                    start, end = s.start, s.end
 
                 segments.append({
                     "start": float(start),
                     "end": float(end),
-                    "text": text,
+                    "text": subtitle_text,
                 })
 
             segments.sort(key=lambda x: x["start"])
